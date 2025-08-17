@@ -1,0 +1,1054 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bus Simulator - Three.js Setup</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            overflow: hidden;
+            background: #000;
+            font-family: Arial, sans-serif;
+        }
+        
+        canvas {
+            display: block;
+        }
+        
+        .ui-overlay {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            color: white;
+            z-index: 1000;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        
+        .controls {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            color: white;
+            z-index: 1000;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 5px;
+            font-size: 12px;
+            line-height: 1.5;
+        }
+
+        .pedal-indicators {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            color: white;
+            z-index: 1000;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 5px;
+            font-size: 12px;
+        }
+
+        .pedal-bar {
+            width: 100px;
+            height: 8px;
+            background: #333;
+            margin: 5px 0;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .pedal-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.1s ease;
+        }
+
+        .accelerator-fill {
+            background: linear-gradient(90deg, #4CAF50, #8BC34A);
+        }
+
+        .brake-fill {
+            background: linear-gradient(90deg, #F44336, #FF9800);
+        }
+    </style>
+</head>
+<body>
+    <div class="ui-overlay">
+        <div>FPS: <span id="fps">60</span></div>
+        <div>Speed: <span id="speed">0</span> km/h</div>
+        <div>Throttle: <span id="throttle">0</span>%</div>
+        <div>Brake: <span id="brakeLevel">0</span>%</div>
+    </div>
+    
+    <div class="controls">
+        <strong>Bus Controls:</strong><br>
+        W - Accelerate (hold for more power)<br>
+        S - Brake (hold for stronger braking)<br>
+        A - Turn Left<br>
+        D - Turn Right<br><br>
+    </div>
+
+    <div class="pedal-indicators">
+        <div>Accelerator</div>
+        <div class="pedal-bar">
+            <div class="pedal-fill accelerator-fill" id="acceleratorBar"></div>
+        </div>
+        <div>Brake</div>
+        <div class="pedal-bar">
+            <div class="pedal-fill brake-fill" id="brakeBar"></div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        // Core Three.js setup
+        let scene, camera, renderer, clock;
+        let stats = { fps: 0, triangles: 0 };
+        
+        // Bus controls with progressive pedal system
+        let controls = {
+            forward: false,
+            backward: false,
+            left: false,
+            right: false,
+            handbrake: false
+        };
+        
+        // Progressive pedal system
+        let pedalSystem = {
+            acceleratorPressTime: 0,
+            brakePressTime: 0,
+            acceleratorLevel: 0, // 0-1 (0-100%)
+            brakeLevel: 0,       // 0-1 (0-100%)
+            maxPressTime: 2.0,   // Time to reach full pedal press (2 seconds)
+            releaseSpeed: 3.0    // How fast pedals release when not pressed
+        };
+        
+        // Physics system
+        let physicsObjects = []; // Store all collidable objects
+        let busPhysics = {
+            velocity: new THREE.Vector3(0, 0, 0),
+            angularVelocity: 0,
+            mass: 1500, // Bus mass in kg
+            friction: 0.85, // Surface friction
+            airResistance: 0.02,
+            collisionDamping: 0.3,
+            minCollisionSpeed: 0.5 // Minimum speed for collision effects
+        };
+        
+        // Bus object reference
+        let bus = null;
+        let busSpeed = 0;
+        let busRotation = 0;
+        const maxSpeed = 20;
+        const maxAcceleration = 15; // Maximum acceleration when pedal fully pressed
+        const maxBraking = 25;       // Maximum braking when pedal fully pressed
+        const turnSpeed = 2;
+        const naturalDeceleration = 3; // Air resistance and rolling resistance
+        
+        // Dynamic world system
+        let worldChunks = new Map(); // Store terrain chunks by coordinate
+        const chunkSize = 100; // Size of each terrain chunk
+        const renderDistance = 2; // How many chunks to render around player
+        const loadDistance = 50; // Distance from edge to start loading new chunks
+        
+        // Initialize the Three.js scene
+        function init() {
+            console.log('🚌 Initializing Bus Simulator...');
+            
+            // Create scene
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB); // Sky blue
+            
+            // Create camera
+            camera = new THREE.PerspectiveCamera(
+                75, // Field of view
+                window.innerWidth / window.innerHeight, // Aspect ratio
+                0.1, // Near clipping plane
+                1000 // Far clipping plane
+            );
+            camera.position.set(0, 5, 10);
+            
+            // Create renderer
+            renderer = new THREE.WebGLRenderer({ 
+                antialias: true,
+                powerPreference: "high-performance"
+            });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Optimize for performance
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            document.body.appendChild(renderer.domElement);
+            
+            // Create clock for timing
+            clock = new THREE.Clock();
+            
+            // Setup scene elements
+            setupLights();
+            createInitialWorld();
+            createSimpleBus();
+            
+            console.log('✅ Three.js setup complete!');
+        }
+        
+        // Setup lighting
+        function setupLights() {
+            // Ambient light for overall illumination
+            const ambientLight = new THREE.AmbientLight(0x404040, 0.4);
+            scene.add(ambientLight);
+            
+            // Directional light (sun)
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(50, 50, 25);
+            directionalLight.castShadow = true;
+            
+            // Configure shadow settings
+            directionalLight.shadow.mapSize.width = 2048;
+            directionalLight.shadow.mapSize.height = 2048;
+            directionalLight.shadow.camera.near = 0.5;
+            directionalLight.shadow.camera.far = 200;
+            directionalLight.shadow.camera.left = -50;
+            directionalLight.shadow.camera.right = 50;
+            directionalLight.shadow.camera.top = 50;
+            directionalLight.shadow.camera.bottom = -50;
+            
+            scene.add(directionalLight);
+        }
+        
+        // Create initial world chunks
+        function createInitialWorld() {
+            // Create initial 3x3 grid of chunks around origin
+            for (let x = -1; x <= 1; x++) {
+                for (let z = -1; z <= 1; z++) {
+                    createChunk(x, z);
+                }
+            }
+        }
+        
+        // Create a single terrain chunk at grid coordinates
+        function createChunk(gridX, gridZ) {
+            const chunkKey = `${gridX},${gridZ}`;
+            
+            // Skip if chunk already exists
+            if (worldChunks.has(chunkKey)) return;
+            
+            const chunkGroup = new THREE.Group();
+            
+            // Calculate world position for this chunk
+            const worldX = gridX * chunkSize;
+            const worldZ = gridZ * chunkSize;
+            
+            // Create ground for this chunk
+            const groundGeometry = new THREE.PlaneGeometry(chunkSize, chunkSize);
+            const groundMaterial = new THREE.MeshLambertMaterial({ 
+                color: 0x90EE90 // Light green
+            });
+            
+            const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+            ground.rotation.x = -Math.PI / 2;
+            ground.position.set(worldX, 0, worldZ);
+            ground.receiveShadow = true;
+            chunkGroup.add(ground);
+            
+            // Create road segment for this chunk (running along Z-axis)
+            const roadGeometry = new THREE.PlaneGeometry(8, chunkSize); // Width=8, Length=chunkSize
+            const roadMaterial = new THREE.MeshLambertMaterial({ 
+                color: 0x333333 // Dark gray
+            });
+            
+            const road = new THREE.Mesh(roadGeometry, roadMaterial);
+            road.rotation.x = -Math.PI / 2;
+            road.position.set(worldX, 0.01, worldZ);
+            road.receiveShadow = true;
+            chunkGroup.add(road);
+            
+            // Add road markings (white dashed lines)
+            createRoadMarkings(chunkGroup, worldX, worldZ);
+            
+            // Add some random scenery (trees, rocks, etc.)
+            addSceneryToChunk(chunkGroup, worldX, worldZ);
+            
+            // Add physics properties and store reference
+            const chunk = {
+                group: chunkGroup,
+                gridX: gridX,
+                gridZ: gridZ,
+                worldX: worldX,
+                worldZ: worldZ,
+                physicsObjects: [] // Store physics objects for this chunk
+            };
+            
+            // Store chunk and add to scene
+            worldChunks.set(chunkKey, chunk);
+            scene.add(chunkGroup);
+        }
+        
+        // Create road markings for a chunk
+        function createRoadMarkings(chunkGroup, worldX, worldZ) {
+            // Center line dashes (running vertically along the road)
+            const dashCount = 10;
+            const dashLength = chunkSize / dashCount * 0.6;
+            const dashWidth = 0.15;
+            
+            for (let i = 0; i < dashCount; i++) {
+                const dashGeometry = new THREE.PlaneGeometry(dashWidth, dashLength); // Width first, then length
+                const dashMaterial = new THREE.MeshLambertMaterial({ 
+                    color: 0xffffff // White
+                });
+                
+                const dash = new THREE.Mesh(dashGeometry, dashMaterial);
+                dash.rotation.x = -Math.PI / 2;
+                // Position dashes vertically along the road center
+                dash.position.set(
+                    worldX, // Center of road (X-axis)
+                    0.02,   // Slightly above road
+                    worldZ - chunkSize/2 + (i + 0.5) * (chunkSize/dashCount) // Along road length (Z-axis)
+                );
+                chunkGroup.add(dash);
+            }
+        }
+        
+        // Create a simple tree
+        function createTree(parent, x, z) {
+            const treeGroup = new THREE.Group();
+            
+            // Trunk
+            const trunkGeometry = new THREE.CylinderGeometry(0.3, 0.5, 3, 8);
+            const trunkMaterial = new THREE.MeshLambertMaterial({ color: 0x8B4513 });
+            const trunk = new THREE.Mesh(trunkGeometry, trunkMaterial);
+            trunk.position.set(0, 1.5, 0);
+            trunk.castShadow = true;
+            treeGroup.add(trunk);
+            
+            // Leaves
+            const leavesGeometry = new THREE.SphereGeometry(2, 8, 6);
+            const leavesMaterial = new THREE.MeshLambertMaterial({ color: 0x228B22 });
+            const leaves = new THREE.Mesh(leavesGeometry, leavesMaterial);
+            leaves.position.set(0, 4, 0);
+            leaves.castShadow = true;
+            treeGroup.add(leaves);
+            
+            treeGroup.position.set(x, 0, z);
+            parent.add(treeGroup);
+        }
+        
+        // Create a simple rock
+        function createRock(parent, x, z) {
+            const rockGeometry = new THREE.SphereGeometry(
+                Math.random() * 0.8 + 0.5, // Random size
+                6, 5
+            );
+            const rockMaterial = new THREE.MeshLambertMaterial({ color: 0x696969 });
+            const rock = new THREE.Mesh(rockGeometry, rockMaterial);
+            rock.position.set(x, 0.5, z);
+            rock.scale.y = 0.6; // Flatten it a bit
+            rock.castShadow = true;
+            parent.add(rock);
+        }
+        
+        // Add random scenery to a chunk
+        function addSceneryToChunk(chunkGroup, worldX, worldZ) {
+            const sceneryCount = Math.floor(Math.random() * 12) + 8; // 8-20 objects per chunk
+            
+            for (let i = 0; i < sceneryCount; i++) {
+                // Random position within chunk, but away from road
+                const side = Math.random() < 0.5 ? -1 : 1; // Left or right side of road
+                const x = worldX + side * (Math.random() * 35 + 10); // 10-45 units from center
+                const z = worldZ + (Math.random() - 0.5) * chunkSize * 0.8;
+                
+                // Create different types of scenery
+                const rand = Math.random();
+                if (rand < 0.3) {
+                    // Buildings
+                    createBuilding(chunkGroup, x, z);
+                } else if (rand < 0.5) {
+                    // Parked cars
+                    createParkedCar(chunkGroup, x, z);
+                } else if (rand < 0.65) {
+                    // Trees
+                    createTree(chunkGroup, x, z);
+                } else if (rand < 0.75) {
+                    // Street lights
+                    createStreetLight(chunkGroup, x, z);
+                } else if (rand < 0.85) {
+                    // Rocks
+                    createRock(chunkGroup, x, z);
+                } else {
+                    // Billboards/Signs
+                    createBillboard(chunkGroup, x, z);
+                }
+            }
+            
+            // Add some roadside elements
+            addRoadsideElements(chunkGroup, worldX, worldZ);
+        }
+        
+        // Create a simple building
+        function createBuilding(parent, x, z) {
+            const buildingGroup = new THREE.Group();
+            
+            // Random building dimensions
+            const width = Math.random() * 8 + 6; // 6-14 units wide
+            const height = Math.random() * 15 + 8; // 8-23 units tall
+            const depth = Math.random() * 8 + 6; // 6-14 units deep
+            
+            // Main building structure
+            const buildingGeometry = new THREE.BoxGeometry(width, height, depth);
+            const buildingColors = [0x8B4513, 0x696969, 0xD2691E, 0x708090, 0xA0522D];
+            const buildingMaterial = new THREE.MeshLambertMaterial({ 
+                color: buildingColors[Math.floor(Math.random() * buildingColors.length)]
+            });
+            
+            const building = new THREE.Mesh(buildingGeometry, buildingMaterial);
+            building.position.set(0, height/2, 0);
+            building.castShadow = true;
+            buildingGroup.add(building);
+            
+            // Windows
+            const windowRows = Math.floor(height / 3);
+            const windowCols = Math.floor(width / 2);
+            
+            for (let row = 0; row < windowRows; row++) {
+                for (let col = 0; col < windowCols; col++) {
+                    if (Math.random() < 0.8) { // 80% chance for window
+                        const windowGeometry = new THREE.BoxGeometry(0.8, 1.2, 0.1);
+                        const windowMaterial = new THREE.MeshLambertMaterial({ 
+                            color: Math.random() < 0.3 ? 0xFFFF00 : 0x87CEEB,
+                            transparent: true,
+                            opacity: 0.7
+                        });
+                        
+                        const window = new THREE.Mesh(windowGeometry, windowMaterial);
+                        window.position.set(
+                            -width/2 + (col + 0.5) * 2,
+                            height/2 - (row + 0.5) * 3,
+                            depth/2 + 0.05
+                        );
+                        buildingGroup.add(window);
+                    }
+                }
+            }
+            
+            buildingGroup.position.set(x, 0, z);
+            parent.add(buildingGroup);
+            
+            // Add to physics objects for collision detection
+            physicsObjects.push({
+                position: new THREE.Vector3(x, height/2, z),
+                size: new THREE.Vector3(width, height, depth),
+                type: 'building',
+                mass: Infinity, // Immovable
+                restitution: 0.1 // Low bounce
+            });
+        }
+        
+        // Create a parked car
+        function createParkedCar(parent, x, z) {
+            const carGroup = new THREE.Group();
+            
+            // Car body
+            const bodyGeometry = new THREE.BoxGeometry(1.8, 0.8, 4);
+            const carColors = [0xFF0000, 0x0000FF, 0x00FF00, 0xFFFF00, 0xFF00FF, 0x00FFFF, 0x800080, 0xFFA500];
+            const bodyMaterial = new THREE.MeshLambertMaterial({ 
+                color: carColors[Math.floor(Math.random() * carColors.length)]
+            });
+            
+            const carBody = new THREE.Mesh(bodyGeometry, bodyMaterial);
+            carBody.position.set(0, 0.4, 0);
+            carBody.castShadow = true;
+            carGroup.add(carBody);
+            
+            // Car roof
+            const roofGeometry = new THREE.BoxGeometry(1.6, 0.6, 2.5);
+            const roofMaterial = new THREE.MeshLambertMaterial({ 
+                color: bodyMaterial.color.getHex()
+            });
+            
+            const carRoof = new THREE.Mesh(roofGeometry, roofMaterial);
+            carRoof.position.set(0, 1, -0.3);
+            carRoof.castShadow = true;
+            carGroup.add(carRoof);
+            
+            // Wheels
+            const wheelGeometry = new THREE.CylinderGeometry(0.4, 0.4, 0.2, 8);
+            const wheelMaterial = new THREE.MeshLambertMaterial({ color: 0x222222 });
+            
+            const wheelPositions = [
+                { x: -0.8, y: 0.4, z: 1.3 },   // Front left
+                { x: 0.8, y: 0.4, z: 1.3 },    // Front right
+                { x: -0.8, y: 0.4, z: -1.3 },  // Rear left
+                { x: 0.8, y: 0.4, z: -1.3 }    // Rear right
+            ];
+            
+            wheelPositions.forEach(pos => {
+                const wheel = new THREE.Mesh(wheelGeometry, wheelMaterial);
+                wheel.position.set(pos.x, pos.y, pos.z);
+                wheel.rotation.z = Math.PI / 2;
+                wheel.castShadow = true;
+                carGroup.add(wheel);
+            });
+            
+            // Random rotation (parked at different angles)
+            carGroup.rotation.y = Math.random() * Math.PI * 2;
+            carGroup.position.set(x, 0, z);
+            parent.add(carGroup);
+            
+            // Add to physics objects
+            physicsObjects.push({
+                position: new THREE.Vector3(x, 0.5, z),
+                size: new THREE.Vector3(1.8, 1.4, 4),
+                type: 'car',
+                mass: 1200,
+                restitution: 0.6
+            });
+        }
+        
+        // Create a street light
+        function createStreetLight(parent, x, z) {
+            const lightGroup = new THREE.Group();
+            
+            // Pole
+            const poleGeometry = new THREE.CylinderGeometry(0.1, 0.15, 8, 8);
+            const poleMaterial = new THREE.MeshLambertMaterial({ color: 0x555555 });
+            const pole = new THREE.Mesh(poleGeometry, poleMaterial);
+            pole.position.set(0, 4, 0);
+            pole.castShadow = true;
+            lightGroup.add(pole);
+            
+            // Light fixture
+            const fixtureGeometry = new THREE.SphereGeometry(0.4, 8, 6);
+            const fixtureMaterial = new THREE.MeshLambertMaterial({ 
+                color: 0xFFFFAA,
+                emissive: 0x222200
+            });
+            const fixture = new THREE.Mesh(fixtureGeometry, fixtureMaterial);
+            fixture.position.set(0, 7.5, 0);
+            fixture.castShadow = true;
+            lightGroup.add(fixture);
+            
+            lightGroup.position.set(x, 0, z);
+            parent.add(lightGroup);
+        }
+        
+        // Create a billboard/sign
+        function createBillboard(parent, x, z) {
+            const billboardGroup = new THREE.Group();
+            
+            // Support poles
+            const poleGeometry = new THREE.CylinderGeometry(0.2, 0.2, 6, 8);
+            const poleMaterial = new THREE.MeshLambertMaterial({ color: 0x8B4513 });
+            
+            const pole1 = new THREE.Mesh(poleGeometry, poleMaterial);
+            pole1.position.set(-2, 3, 0);
+            pole1.castShadow = true;
+            billboardGroup.add(pole1);
+            
+            const pole2 = new THREE.Mesh(poleGeometry, poleMaterial);
+            pole2.position.set(2, 3, 0);
+            pole2.castShadow = true;
+            billboardGroup.add(pole2);
+            
+            // Billboard sign
+            const signGeometry = new THREE.BoxGeometry(6, 3, 0.2);
+            const signColors = [0xFF6B35, 0x4ECDC4, 0x45B7D1, 0x96CEB4, 0xF7DC6F];
+            const signMaterial = new THREE.MeshLambertMaterial({ 
+                color: signColors[Math.floor(Math.random() * signColors.length)]
+            });
+            
+            const sign = new THREE.Mesh(signGeometry, signMaterial);
+            sign.position.set(0, 5, 0);
+            sign.castShadow = true;
+            billboardGroup.add(sign);
+            
+            billboardGroup.position.set(x, 0, z);
+            parent.add(billboardGroup);
+        }
+        
+        // Add roadside elements like guardrails, signs
+        function addRoadsideElements(chunkGroup, worldX, worldZ) {
+            // Traffic signs near road
+            if (Math.random() < 0.3) { // 30% chance per chunk
+                const signSide = Math.random() < 0.5 ? -1 : 1;
+                const signX = worldX + signSide * 6; // Just off the road
+                const signZ = worldZ + (Math.random() - 0.5) * chunkSize * 0.6;
+                
+                createTrafficSign(chunkGroup, signX, signZ);
+            }
+            
+            // Small roadside objects
+            for (let i = 0; i < 3; i++) {
+                if (Math.random() < 0.4) {
+                    const side = Math.random() < 0.5 ? -1 : 1;
+                    const objX = worldX + side * (Math.random() * 3 + 5); // Close to road
+                    const objZ = worldZ + (Math.random() - 0.5) * chunkSize * 0.8;
+                    
+                    // Random small objects
+                    if (Math.random() < 0.5) {
+                        createFireHydrant(chunkGroup, objX, objZ);
+                    } else {
+                        createBench(chunkGroup, objX, objZ);
+                    }
+                }
+            }
+        }
+        
+        // Create traffic sign
+        function createTrafficSign(parent, x, z) {
+            const signGroup = new THREE.Group();
+            
+            // Post
+            const postGeometry = new THREE.CylinderGeometry(0.08, 0.08, 3, 8);
+            const postMaterial = new THREE.MeshLambertMaterial({ color: 0x666666 });
+            const post = new THREE.Mesh(postGeometry, postMaterial);
+            post.position.set(0, 1.5, 0);
+            post.castShadow = true;
+            signGroup.add(post);
+            
+            // Sign
+            const signGeometry = new THREE.BoxGeometry(1, 1, 0.1);
+            const signMaterial = new THREE.MeshLambertMaterial({ color: 0xFF0000 });
+            const sign = new THREE.Mesh(signGeometry, signMaterial);
+            sign.position.set(0, 2.8, 0);
+            sign.castShadow = true;
+            signGroup.add(sign);
+            
+            signGroup.position.set(x, 0, z);
+            parent.add(signGroup);
+        }
+        
+        // Create fire hydrant
+        function createFireHydrant(parent, x, z) {
+            const hydrantGeometry = new THREE.CylinderGeometry(0.3, 0.4, 1.2, 8);
+            const hydrantMaterial = new THREE.MeshLambertMaterial({ color: 0xFF0000 });
+            const hydrant = new THREE.Mesh(hydrantGeometry, hydrantMaterial);
+            hydrant.position.set(x, 0.6, z);
+            hydrant.castShadow = true;
+            parent.add(hydrant);
+        }
+        
+        // Create bench
+        function createBench(parent, x, z) {
+            const benchGroup = new THREE.Group();
+            
+            // Seat
+            const seatGeometry = new THREE.BoxGeometry(2, 0.2, 0.8);
+            const seatMaterial = new THREE.MeshLambertMaterial({ color: 0x8B4513 });
+            const seat = new THREE.Mesh(seatGeometry, seatMaterial);
+            seat.position.set(0, 0.8, 0);
+            seat.castShadow = true;
+            benchGroup.add(seat);
+            
+            // Back
+            const backGeometry = new THREE.BoxGeometry(2, 0.8, 0.1);
+            const back = new THREE.Mesh(backGeometry, seatMaterial);
+            back.position.set(0, 1.2, -0.35);
+            back.castShadow = true;
+            benchGroup.add(back);
+            
+            // Legs
+            for (let i = 0; i < 4; i++) {
+                const legGeometry = new THREE.BoxGeometry(0.1, 0.8, 0.1);
+                const leg = new THREE.Mesh(legGeometry, seatMaterial);
+                leg.position.set(
+                    i < 2 ? -0.8 : 0.8,
+                    0.4,
+                    i % 2 === 0 ? -0.3 : 0.3
+                );
+                leg.castShadow = true;
+                benchGroup.add(leg);
+            }
+            
+            benchGroup.position.set(x, 0, z);
+            parent.add(benchGroup);
+        }
+        
+        // Update world chunks based on bus position
+        function updateWorld() {
+            if (!bus) return;
+            
+            const busPos = bus.position;
+            const currentChunkX = Math.floor(busPos.x / chunkSize);
+            const currentChunkZ = Math.floor(busPos.z / chunkSize);
+            
+            // Load chunks around current position
+            for (let x = currentChunkX - renderDistance; x <= currentChunkX + renderDistance; x++) {
+                for (let z = currentChunkZ - renderDistance; z <= currentChunkZ + renderDistance; z++) {
+                    createChunk(x, z);
+                }
+            }
+            
+            // Unload distant chunks to save memory
+            const chunksToRemove = [];
+            worldChunks.forEach((chunk, key) => {
+                const dx = Math.abs(chunk.gridX - currentChunkX);
+                const dz = Math.abs(chunk.gridZ - currentChunkZ);
+                
+                if (dx > renderDistance + 1 || dz > renderDistance + 1) {
+                    chunksToRemove.push(key);
+                }
+            });
+            
+            // Remove distant chunks
+            chunksToRemove.forEach(key => {
+                const chunk = worldChunks.get(key);
+                scene.remove(chunk.group);
+                worldChunks.delete(key);
+            });
+        }
+        
+        // Create a simple bus placeholder
+        function createSimpleBus() {
+            // Create bus group to hold all bus parts
+            bus = new THREE.Group();
+            
+            // Bus body
+            const busGeometry = new THREE.BoxGeometry(3, 2, 8);
+            const busMaterial = new THREE.MeshLambertMaterial({ 
+                color: 0xff6b35 // Orange bus color
+            });
+            
+            const busBody = new THREE.Mesh(busGeometry, busMaterial);
+            busBody.position.set(0, 0, 0);
+            busBody.castShadow = true;
+            bus.add(busBody);
+            
+            // Bus windows
+            const windowGeometry = new THREE.BoxGeometry(2.8, 0.8, 7.8);
+            const windowMaterial = new THREE.MeshLambertMaterial({ 
+                color: 0x87CEEB, 
+                transparent: true, 
+                opacity: 0.3 
+            });
+            
+            const windows = new THREE.Mesh(windowGeometry, windowMaterial);
+            windows.position.set(0, 0.4, 0);
+            bus.add(windows);
+            
+            // Wheels
+            const wheelGeometry = new THREE.CylinderGeometry(0.8, 0.8, 0.3, 8);
+            const wheelMaterial = new THREE.MeshLambertMaterial({ color: 0x222222 });
+            
+            const wheelPositions = [
+                { x: -1.2, y: -0.2, z: 2.5 },   // Front left
+                { x: 1.2, y: -0.2, z: 2.5 },    // Front right
+                { x: -1.2, y: -0.2, z: -2.5 },  // Rear left
+                { x: 1.2, y: -0.2, z: -2.5 }    // Rear right
+            ];
+            
+            wheelPositions.forEach(pos => {
+                const wheel = new THREE.Mesh(wheelGeometry, wheelMaterial);
+                wheel.position.set(pos.x, pos.y, pos.z);
+                wheel.rotation.z = Math.PI / 2; // Rotate to be vertical
+                wheel.castShadow = true;
+                bus.add(wheel);
+            });
+            
+            // Position bus above ground and align with road (facing forward along negative Z)
+            bus.position.set(0, 1, 0);
+            bus.rotation.y = Math.PI; // Rotate 180 degrees to face forward properly
+            scene.add(bus);
+            
+            console.log('🚌 Bus created and ready to drive!');
+        }
+        
+        // Input handling
+        function setupInput() {
+            // Keyboard events
+            window.addEventListener('keydown', (event) => {
+                switch(event.code) {
+                    case 'KeyW': controls.forward = true; break;
+                    case 'KeyS': controls.backward = true; break;
+                    case 'KeyA': controls.left = true; break;
+                    case 'KeyD': controls.right = true; break;
+                    case 'Space': 
+                        event.preventDefault(); // Prevent page scroll
+                        controls.handbrake = true; 
+                        break;
+                }
+            });
+            
+            window.addEventListener('keyup', (event) => {
+                switch(event.code) {
+                    case 'KeyW': controls.forward = false; break;
+                    case 'KeyS': controls.backward = false; break;
+                    case 'KeyA': controls.left = false; break;
+                    case 'KeyD': controls.right = false; break;
+                    case 'Space': controls.handbrake = false; break;
+                }
+            });
+        }
+        
+        // Collision detection between two boxes
+        function checkCollision(pos1, size1, pos2, size2) {
+            return (Math.abs(pos1.x - pos2.x) < (size1.x + size2.x) / 2) &&
+                   (Math.abs(pos1.y - pos2.y) < (size1.y + size2.y) / 2) &&
+                   (Math.abs(pos1.z - pos2.z) < (size1.z + size2.z) / 2);
+        }
+        
+        // Handle collision response
+        function handleCollision(physicsObj, collisionSpeed) {
+            if (!bus) return;
+            
+            // Calculate collision direction
+            const collisionDirection = new THREE.Vector3()
+                .subVectors(bus.position, physicsObj.position)
+                .normalize();
+            
+            // Apply collision force based on speed and object properties
+            const collisionForce = collisionSpeed * physicsObj.restitution;
+            
+            // Push bus away from collision
+            busPhysics.velocity.add(
+                collisionDirection.clone().multiplyScalar(collisionForce * 0.3)
+            );
+            
+            // Reduce bus speed based on collision
+            busSpeed *= (1 - busPhysics.collisionDamping);
+            
+            // Add some angular velocity for realistic spinning effect
+            busPhysics.angularVelocity += (Math.random() - 0.5) * collisionForce * 0.1;
+            
+            // Visual feedback - camera shake could be added here
+            console.log(`🚨 Collision with ${physicsObj.type}! Speed: ${collisionSpeed.toFixed(1)} km/h`);
+        }
+        
+        // Physics update
+        function updatePhysics(deltaTime) {
+            if (!bus) return;
+            
+            // Bus collision box
+            const busSize = new THREE.Vector3(3, 2, 8);
+            const busPos = bus.position.clone();
+            
+            // Check collisions with all physics objects
+            physicsObjects.forEach(obj => {
+                if (checkCollision(busPos, busSize, obj.position, obj.size)) {
+                    const currentSpeed = Math.abs(busSpeed) * 3.6; // Convert to km/h
+                    if (currentSpeed > busPhysics.minCollisionSpeed) {
+                        handleCollision(obj, currentSpeed);
+                    }
+                }
+            });
+            
+            // Apply angular velocity (bus rotation from collisions)
+            if (Math.abs(busPhysics.angularVelocity) > 0.01) {
+                busRotation += busPhysics.angularVelocity * deltaTime;
+                busPhysics.angularVelocity *= 0.95; // Damping
+            }
+            
+            // Apply air resistance to velocity
+            busPhysics.velocity.multiplyScalar(1 - busPhysics.airResistance * deltaTime * 60);
+            
+            // Apply physics velocity to bus position
+            bus.position.add(
+                busPhysics.velocity.clone().multiplyScalar(deltaTime)
+            );
+        }
+        // Update progressive pedal system
+        function updatePedalSystem(deltaTime) {
+            // Update accelerator pedal
+            if (controls.forward) {
+                pedalSystem.acceleratorPressTime = Math.min(
+                    pedalSystem.maxPressTime, 
+                    pedalSystem.acceleratorPressTime + deltaTime
+                );
+            } else {
+                pedalSystem.acceleratorPressTime = Math.max(
+                    0, 
+                    pedalSystem.acceleratorPressTime - pedalSystem.releaseSpeed * deltaTime
+                );
+            }
+            
+            // Update brake pedal
+            if (controls.backward) {
+                pedalSystem.brakePressTime = Math.min(
+                    pedalSystem.maxPressTime, 
+                    pedalSystem.brakePressTime + deltaTime
+                );
+            } else {
+                pedalSystem.brakePressTime = Math.max(
+                    0, 
+                    pedalSystem.brakePressTime - pedalSystem.releaseSpeed * deltaTime
+                );
+            }
+            
+            // Calculate pedal levels (0-1)
+            pedalSystem.acceleratorLevel = pedalSystem.acceleratorPressTime / pedalSystem.maxPressTime;
+            pedalSystem.brakeLevel = pedalSystem.brakePressTime / pedalSystem.maxPressTime;
+            
+            // Apply easing curve for more realistic feel
+            pedalSystem.acceleratorLevel = easeInOutQuad(pedalSystem.acceleratorLevel);
+            pedalSystem.brakeLevel = easeInOutQuad(pedalSystem.brakeLevel);
+        }
+        
+        // Easing function for more realistic pedal response
+        function easeInOutQuad(t) {
+            return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+        }
+        
+        // Update bus physics and movement
+        function updateBus(deltaTime) {
+            if (!bus) return;
+            
+            // Calculate current acceleration and braking forces
+            const currentAcceleration = maxAcceleration * pedalSystem.acceleratorLevel;
+            let currentBraking = maxBraking * pedalSystem.brakeLevel;
+            
+            // Handbrake effect - much stronger braking
+            if (controls.handbrake) {
+                currentBraking = Math.max(currentBraking, maxBraking * 1.5);
+                busPhysics.velocity.multiplyScalar(0.85); // Additional drag from handbrake
+            }
+            
+            // Apply forces to bus speed
+            if (pedalSystem.acceleratorLevel > 0.01 && !controls.handbrake) {
+                // Accelerating (can't accelerate with handbrake on)
+                busSpeed = Math.min(maxSpeed, busSpeed + currentAcceleration * deltaTime);
+            } else if (pedalSystem.brakeLevel > 0.01 || controls.handbrake) {
+                // Braking
+                if (busSpeed > 0) {
+                    busSpeed = Math.max(0, busSpeed - currentBraking * deltaTime);
+                } else {
+                    // Allow reverse when stopped (but not with handbrake)
+                    if (!controls.handbrake) {
+                        busSpeed = Math.max(-maxSpeed * 0.3, busSpeed - currentBraking * 0.5 * deltaTime);
+                    }
+                }
+            } else {
+                // Natural deceleration (air resistance, rolling resistance)
+                const deceleration = naturalDeceleration * (1 + Math.abs(busPhysics.velocity.length()) * 0.1);
+                if (busSpeed > 0) {
+                    busSpeed = Math.max(0, busSpeed - deceleration * deltaTime);
+                } else if (busSpeed < 0) {
+                    busSpeed = Math.min(0, busSpeed + deceleration * deltaTime);
+                }
+            }
+            
+            // Handle steering (reduced effectiveness with handbrake)
+            if (Math.abs(busSpeed) > 0.1) {
+                const steeringMultiplier = Math.min(1, Math.abs(busSpeed) / maxSpeed);
+                const handbrakeReduction = controls.handbrake ? 0.3 : 1.0; // Harder to steer with handbrake
+                
+                if (controls.left) {
+                    busRotation += turnSpeed * deltaTime * steeringMultiplier * handbrakeReduction;
+                }
+                if (controls.right) {
+                    busRotation -= turnSpeed * deltaTime * steeringMultiplier * handbrakeReduction;
+                }
+            }
+            
+            // Apply movement (negative Z = forward direction for the bus)
+            const moveDirection = new THREE.Vector3(0, 0, -busSpeed * deltaTime);
+            moveDirection.applyAxisAngle(new THREE.Vector3(0, 1, 0), busRotation);
+            
+            // Store intended movement for physics system
+            const intendedMovement = moveDirection.clone();
+            
+            bus.position.add(moveDirection);
+            bus.rotation.y = busRotation;
+            
+            // Update physics velocity based on actual movement
+            busPhysics.velocity.copy(intendedMovement.divideScalar(deltaTime));
+        }
+        
+        // Update camera to follow bus
+        function updateCamera(deltaTime) {
+            if (!bus) return;
+            
+            // Camera follows bus from behind and slightly above
+            const idealOffset = new THREE.Vector3(0, 8, 15);
+            idealOffset.applyAxisAngle(new THREE.Vector3(0, 1, 0), busRotation);
+            
+            const targetPosition = bus.position.clone().add(idealOffset);
+            
+            // Smooth camera movement
+            camera.position.lerp(targetPosition, 5 * deltaTime);
+            
+            // Camera looks at the bus
+            const lookAtTarget = bus.position.clone();
+            lookAtTarget.y += 1; // Look slightly above the bus center
+            camera.lookAt(lookAtTarget);
+        }
+        
+        // Update UI elements
+        function updateUI() {
+            // Update pedal indicators
+            const acceleratorBar = document.getElementById('acceleratorBar');
+            const brakeBar = document.getElementById('brakeBar');
+            
+            acceleratorBar.style.width = (pedalSystem.acceleratorLevel * 100) + '%';
+            brakeBar.style.width = (pedalSystem.brakeLevel * 100) + '%';
+            
+            // Update text displays
+            document.getElementById('throttle').textContent = Math.round(pedalSystem.acceleratorLevel * 100);
+            document.getElementById('brakeLevel').textContent = Math.round(pedalSystem.brakeLevel * 100);
+        }
+        
+        // Performance monitoring
+        let frameCount = 0;
+        let lastTime = 0;
+        
+        function updateStats() {
+            frameCount++;
+            const currentTime = performance.now();
+            
+            // Update FPS every second
+            if (currentTime - lastTime >= 1000) {
+                stats.fps = Math.round(frameCount * 1000 / (currentTime - lastTime));
+                
+                // Update UI
+                document.getElementById('fps').textContent = stats.fps;
+                document.getElementById('speed').textContent = Math.round(Math.abs(busSpeed) * 3.6); // Convert m/s to km/h
+                
+                frameCount = 0;
+                lastTime = currentTime;
+            }
+        }
+        
+        // Main render loop
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            const deltaTime = clock.getDelta();
+            
+            // Update systems
+            updatePedalSystem(deltaTime);
+            updateBus(deltaTime);
+            updateCamera(deltaTime);
+            updateWorld(); // Update world chunks
+            updateUI();
+            updateStats();
+            
+            // Render the scene
+            renderer.render(scene, camera);
+        }
+        
+        // Handle window resize
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+        
+        window.addEventListener('resize', onWindowResize);
+        
+        // Initialize everything when page loads
+        window.addEventListener('load', () => {
+            init();
+            setupInput();
+            animate();
+            console.log('🎮 Bus Simulator with realistic pedal system is running!');
+        });
+    </script>
+</body>
+</html>
