@@ -115,6 +115,11 @@
         let scene, camera, renderer, clock;
         let stats = { fps: 0, triangles: 0 };
         
+        // Texture cache and loading management
+        const textureCache = {};
+        const loadingManager = new THREE.LoadingManager();
+        let texturesLoaded = false;
+        
         // Bus controls with progressive pedal system
         let controls = {
             forward: false,
@@ -128,6 +133,9 @@
         let pedalSystem = {
             acceleratorPressTime: 0,
             brakePressTime: 0,
+            handbrakeEngagement: 0,     // 0-1 (0-100%) handbrake engagement level
+            handbrakeApplyRate: 1.5,     // How fast handbrake engages (faster than normal brakes)
+            handbrakeReleaseRate: 2.0,   // How fast handbrake releases
             acceleratorLevel: 0, // 0-1 (0-100%)
             brakeLevel: 0,       // 0-1 (0-100%)
             maxPressTime: 2.0,   // Time to reach full pedal press (2 seconds)
@@ -179,15 +187,18 @@
             );
             camera.position.set(0, 5, 10);
             
-            // Create renderer
+            // Create renderer with optimized settings
             renderer = new THREE.WebGLRenderer({ 
                 antialias: true,
-                powerPreference: "high-performance"
+                powerPreference: "high-performance",
+                precision: "mediump" // Use medium precision for better performance
             });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Optimize for performance
             renderer.shadowMap.enabled = true;
             renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            renderer.physicallyCorrectLights = false; // Disable for better performance
+            renderer.outputEncoding = THREE.LinearEncoding; // Faster than sRGB encoding
             document.body.appendChild(renderer.domElement);
             
             // Create clock for timing
@@ -212,15 +223,17 @@
             directionalLight.position.set(50, 50, 25);
             directionalLight.castShadow = true;
             
-            // Configure shadow settings
-            directionalLight.shadow.mapSize.width = 2048;
-            directionalLight.shadow.mapSize.height = 2048;
+            // Configure shadow settings with optimized values
+            directionalLight.shadow.mapSize.width = 1024; // Reduced for better performance
+            directionalLight.shadow.mapSize.height = 1024; // Reduced for better performance
             directionalLight.shadow.camera.near = 0.5;
             directionalLight.shadow.camera.far = 200;
             directionalLight.shadow.camera.left = -50;
             directionalLight.shadow.camera.right = 50;
             directionalLight.shadow.camera.top = 50;
             directionalLight.shadow.camera.bottom = -50;
+            directionalLight.shadow.bias = -0.001; // Reduce shadow acne
+            directionalLight.shadow.normalBias = 0.05; // Improve shadow quality
             
             scene.add(directionalLight);
         }
@@ -232,6 +245,33 @@
                 for (let z = -1; z <= 1; z++) {
                     createChunk(x, z);
                 }
+            }
+        }
+        
+        // Preload textures to prevent glitching
+        function preloadTextures() {
+            // Configure loading manager
+            loadingManager.onLoad = function() {
+                console.log('🎨 All textures loaded successfully!');
+                texturesLoaded = true;
+            };
+            
+            loadingManager.onProgress = function(url, itemsLoaded, itemsTotal) {
+                console.log(`Loading textures: ${Math.round(itemsLoaded / itemsTotal * 100)}% complete`);
+            };
+            
+            loadingManager.onError = function(url) {
+                console.error('Error loading texture:', url);
+            };
+            
+            // Load grass texture once and store in cache
+            if (!textureCache['grass']) {
+                const textureLoader = new THREE.TextureLoader(loadingManager);
+                textureCache['grass'] = textureLoader.load('grass.jpg', function(texture) {
+                    texture.wrapS = THREE.RepeatWrapping;
+                    texture.wrapT = THREE.RepeatWrapping;
+                    texture.repeat.set(10, 10);
+                });
             }
         }
         
@@ -250,8 +290,22 @@
             
             // Create ground for this chunk
             const groundGeometry = new THREE.PlaneGeometry(chunkSize, chunkSize);
+            
+            // Use cached grass texture instead of loading it each time
+            let grassTexture;
+            if (textureCache['grass']) {
+                grassTexture = textureCache['grass'];
+            } else {
+                // Fallback if texture isn't cached yet
+                grassTexture = new THREE.TextureLoader().load('grass.jpg');
+                grassTexture.wrapS = THREE.RepeatWrapping;
+                grassTexture.wrapT = THREE.RepeatWrapping;
+                grassTexture.repeat.set(10, 10);
+                textureCache['grass'] = grassTexture;
+            }
+            
             const groundMaterial = new THREE.MeshLambertMaterial({ 
-                color: 0x90EE90 // Light green
+                map: grassTexture
             });
             
             const ground = new THREE.Mesh(groundGeometry, groundMaterial);
@@ -674,7 +728,7 @@
         
         // Update world chunks based on bus position
         function updateWorld() {
-            if (!bus) return;
+            if (!bus || !texturesLoaded) return;
             
             const busPos = bus.position;
             const currentChunkX = Math.floor(busPos.x / chunkSize);
@@ -823,37 +877,22 @@
         }
         
         // Physics update
-        function updatePhysics(deltaTime) {
-            if (!bus) return;
-            
-            // Bus collision box
-            const busSize = new THREE.Vector3(3, 2, 8);
-            const busPos = bus.position.clone();
-            
-            // Check collisions with all physics objects
-            physicsObjects.forEach(obj => {
-                if (checkCollision(busPos, busSize, obj.position, obj.size)) {
-                    const currentSpeed = Math.abs(busSpeed) * 3.6; // Convert to km/h
-                    if (currentSpeed > busPhysics.minCollisionSpeed) {
-                        handleCollision(obj, currentSpeed);
-                    }
-                }
-            });
-            
-            // Apply angular velocity (bus rotation from collisions)
-            if (Math.abs(busPhysics.angularVelocity) > 0.01) {
-                busRotation += busPhysics.angularVelocity * deltaTime;
-                busPhysics.angularVelocity *= 0.95; // Damping
-            }
-            
-            // Apply air resistance to velocity
-            busPhysics.velocity.multiplyScalar(1 - busPhysics.airResistance * deltaTime * 60);
-            
-            // Apply physics velocity to bus position
-            bus.position.add(
-                busPhysics.velocity.clone().multiplyScalar(deltaTime)
-            );
-        }
+      function updatePhysics(deltaTime) {
+    if (!bus) return;
+
+    // Apply angular velocity (bus rotation from collisions)
+    if (Math.abs(busPhysics.angularVelocity) > 0.01) {
+        busRotation += busPhysics.angularVelocity * deltaTime;
+        busPhysics.angularVelocity *= 0.95; // Damping
+    }
+
+    // Apply air resistance to velocity
+    busPhysics.velocity.multiplyScalar(1 - busPhysics.airResistance * deltaTime * 60);
+
+    // No longer move bus here! Movement is handled in updateBus after collision check.
+}
+
+        
         // Update progressive pedal system
         function updatePedalSystem(deltaTime) {
             // Update accelerator pedal
@@ -896,71 +935,107 @@
             return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
         }
         
-        // Update bus physics and movement
+        // Update bus physics and movement with optimized calculations
         function updateBus(deltaTime) {
-            if (!bus) return;
-            
-            // Calculate current acceleration and braking forces
-            const currentAcceleration = maxAcceleration * pedalSystem.acceleratorLevel;
-            let currentBraking = maxBraking * pedalSystem.brakeLevel;
-            
-            // Handbrake effect - much stronger braking
-            if (controls.handbrake) {
-                currentBraking = Math.max(currentBraking, maxBraking * 1.5);
-                busPhysics.velocity.multiplyScalar(0.85); // Additional drag from handbrake
+    if (!bus) return;
+    
+    // Skip physics update if deltaTime is too small (optimization)
+    if (deltaTime < 0.001) return;
+
+    // Calculate current acceleration and braking forces
+    const currentAcceleration = maxAcceleration * pedalSystem.acceleratorLevel;
+    let currentBraking = maxBraking * pedalSystem.brakeLevel;
+
+    // Handbrake effect - much stronger braking
+    if (controls.handbrake) {
+        currentBraking = Math.max(currentBraking, maxBraking * 1.5);
+        busPhysics.velocity.multiplyScalar(0.85); // Additional drag from handbrake
+    }
+
+    // Apply forces to bus speed - optimized calculations
+    if (pedalSystem.acceleratorLevel > 0.01 && !controls.handbrake) {
+        // Accelerating (can't accelerate with handbrake on)
+        busSpeed += currentAcceleration * deltaTime;
+        if (busSpeed > maxSpeed) busSpeed = maxSpeed; // Faster than Math.min
+    } else if (pedalSystem.brakeLevel > 0.01 || controls.handbrake) {
+        // Braking
+        if (busSpeed > 0) {
+            busSpeed -= currentBraking * deltaTime;
+            if (busSpeed < 0) busSpeed = 0; // Faster than Math.max
+        } else {
+            // Allow reverse when stopped (but not with handbrake)
+            if (!controls.handbrake) {
+                busSpeed -= currentBraking * 0.5 * deltaTime;
+                if (busSpeed < -maxSpeed * 0.3) busSpeed = -maxSpeed * 0.3; // Faster than Math.max
             }
-            
-            // Apply forces to bus speed
-            if (pedalSystem.acceleratorLevel > 0.01 && !controls.handbrake) {
-                // Accelerating (can't accelerate with handbrake on)
-                busSpeed = Math.min(maxSpeed, busSpeed + currentAcceleration * deltaTime);
-            } else if (pedalSystem.brakeLevel > 0.01 || controls.handbrake) {
-                // Braking
-                if (busSpeed > 0) {
-                    busSpeed = Math.max(0, busSpeed - currentBraking * deltaTime);
-                } else {
-                    // Allow reverse when stopped (but not with handbrake)
-                    if (!controls.handbrake) {
-                        busSpeed = Math.max(-maxSpeed * 0.3, busSpeed - currentBraking * 0.5 * deltaTime);
-                    }
-                }
-            } else {
-                // Natural deceleration (air resistance, rolling resistance)
-                const deceleration = naturalDeceleration * (1 + Math.abs(busPhysics.velocity.length()) * 0.1);
-                if (busSpeed > 0) {
-                    busSpeed = Math.max(0, busSpeed - deceleration * deltaTime);
-                } else if (busSpeed < 0) {
-                    busSpeed = Math.min(0, busSpeed + deceleration * deltaTime);
-                }
-            }
-            
-            // Handle steering (reduced effectiveness with handbrake)
-            if (Math.abs(busSpeed) > 0.1) {
-                const steeringMultiplier = Math.min(1, Math.abs(busSpeed) / maxSpeed);
-                const handbrakeReduction = controls.handbrake ? 0.3 : 1.0; // Harder to steer with handbrake
-                
-                if (controls.left) {
-                    busRotation += turnSpeed * deltaTime * steeringMultiplier * handbrakeReduction;
-                }
-                if (controls.right) {
-                    busRotation -= turnSpeed * deltaTime * steeringMultiplier * handbrakeReduction;
-                }
-            }
-            
-            // Apply movement (negative Z = forward direction for the bus)
-            const moveDirection = new THREE.Vector3(0, 0, -busSpeed * deltaTime);
-            moveDirection.applyAxisAngle(new THREE.Vector3(0, 1, 0), busRotation);
-            
-            // Store intended movement for physics system
-            const intendedMovement = moveDirection.clone();
-            
-            bus.position.add(moveDirection);
-            bus.rotation.y = busRotation;
-            
-            // Update physics velocity based on actual movement
-            busPhysics.velocity.copy(intendedMovement.divideScalar(deltaTime));
         }
-        
+    } else {
+        // Natural deceleration (air resistance, rolling resistance) - cached calculation
+        const deceleration = naturalDeceleration * (1 + Math.abs(busPhysics.velocity.length()) * 0.1);
+        if (busSpeed > 0) {
+            busSpeed -= deceleration * deltaTime;
+            if (busSpeed < 0) busSpeed = 0; // Faster than Math.max
+        } else if (busSpeed < 0) {
+            busSpeed += deceleration * deltaTime;
+            if (busSpeed > 0) busSpeed = 0; // Faster than Math.min
+        }
+    }
+
+    // Handle steering (reduced effectiveness with handbrake)
+    if (Math.abs(busSpeed) > 0.1) {
+    const steeringMultiplier = Math.min(1, Math.abs(busSpeed) / maxSpeed);
+    const handbrakeReduction = controls.handbrake ? 0.3 : 1.0; // Harder to steer with handbrake
+    const steeringDirection = busSpeed >= 0 ? 1 : -1; // Invert steering when reversing
+    if (controls.left) {
+        busRotation += turnSpeed * deltaTime * steeringMultiplier * handbrakeReduction * steeringDirection;
+    }
+    if (controls.right) {
+        busRotation -= turnSpeed * deltaTime * steeringMultiplier * handbrakeReduction * steeringDirection;
+    }
+}
+
+    // Calculate intended movement (negative Z = forward direction for the bus)
+    const moveDirection = new THREE.Vector3(0, 0, -busSpeed * deltaTime);
+    moveDirection.applyAxisAngle(new THREE.Vector3(0, 1, 0), busRotation);
+
+    // Predict next position
+    const nextPosition = bus.position.clone().add(moveDirection);
+    const busSize = new THREE.Vector3(3, 2, 8);
+
+    // Check for collision at next position
+    let collisionDetected = false;
+    for (let obj of physicsObjects) {
+       if (checkCollision(nextPosition, busSize, obj.position, obj.size)) {
+    collisionDetected = true;
+    // Only stop if it's a solid object (building, car, etc.)
+    if (obj.type === 'building' || obj.type === 'car') {
+        // Stop the bus and prevent movement
+        busSpeed = 0;
+        busPhysics.velocity.set(0, 0, 0);
+        // Nudge bus slightly away from object (X/Z only)
+        const away = nextPosition.clone().sub(obj.position);
+        away.y = 0; // Ignore Y axis
+        if (away.length() > 0) {
+            away.normalize().multiplyScalar(0.1);
+            bus.position.add(away);
+        }
+        // Always reset bus height to ground level
+        bus.position.y = 1;
+    }
+    break;
+}
+    }
+
+    // Only move bus if no collision
+    if (!collisionDetected) {
+        bus.position.add(moveDirection);
+    }
+
+    bus.rotation.y = busRotation;
+
+    // Update physics velocity based on actual movement
+    busPhysics.velocity.copy(moveDirection.divideScalar(deltaTime));
+}
         // Update camera to follow bus
         function updateCamera(deltaTime) {
             if (!bus) return;
@@ -1015,18 +1090,32 @@
             }
         }
         
-        // Main render loop
-        function animate() {
+        // Main render loop with frame rate limiting
+        let lastFrameTime = 0;
+        const targetFPS = 60; // Target frame rate
+        const frameInterval = 1000 / targetFPS;
+        
+        function animate(currentTime) {
             requestAnimationFrame(animate);
             
-            const deltaTime = clock.getDelta();
+            // Skip frames to maintain target FPS
+            if (currentTime - lastFrameTime < frameInterval) return;
+            
+            // Calculate delta time with a maximum value to prevent large jumps
+            const deltaTime = Math.min(clock.getDelta(), 0.1);
+            lastFrameTime = currentTime;
             
             // Update systems
             updatePedalSystem(deltaTime);
             updateBus(deltaTime);
             updateCamera(deltaTime);
-            updateWorld(); // Update world chunks
-            updateUI();
+            
+            // Only update world and UI at lower frequency
+            if (frameCount % 3 === 0) {
+                updateWorld(); // Update world chunks less frequently
+                updateUI(); // Update UI less frequently
+            }
+            
             updateStats();
             
             // Render the scene
@@ -1042,8 +1131,10 @@
         
         window.addEventListener('resize', onWindowResize);
         
-        // Initialize everything when page loads
+    
         window.addEventListener('load', () => {
+            // Preload textures before initializing the scene
+            preloadTextures();
             init();
             setupInput();
             animate();
