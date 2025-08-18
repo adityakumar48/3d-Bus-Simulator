@@ -88,6 +88,17 @@
       <div>Speed: <span id="speed">0</span> km/h</div>
       <div>Throttle: <span id="throttle">0</span>%</div>
       <div>Brake: <span id="brakeLevel">0</span>%</div>
+      <div>
+        <label style="cursor: pointer">
+          <input
+            type="checkbox"
+            id="autopilotToggle"
+            style="vertical-align: middle; margin-right: 4px"
+          />
+          Autopilot
+        </label>
+        <span id="autopilotStatus">OFF</span>
+      </div>
     </div>
 
     <div class="controls">
@@ -904,6 +915,14 @@
               event.preventDefault(); // Prevent page scroll
               controls.handbrake = true;
               break;
+            case "KeyP":
+              autopilotEnabled = !autopilotEnabled;
+              document.getElementById("autopilotStatus").textContent =
+                autopilotEnabled ? "ON" : "OFF";
+              document.getElementById("autopilotToggle").checked =
+                autopilotEnabled;
+              console.log("Autopilot:", autopilotEnabled ? "ON" : "OFF");
+              break;
           }
         });
 
@@ -1038,6 +1057,47 @@
       function updateBus(deltaTime) {
         if (!bus) return;
 
+        // --- AUTOPILOT LOGIC ---
+        if (autopilotEnabled) {
+          // Target: center of the nearest road chunk
+          // Find the closest road center (assume road is always at x=0)
+          const targetX = 0;
+          const targetZ = bus.position.z - 20; // Look ahead 20 units
+
+          // Calculate desired direction
+          const toTarget = new THREE.Vector3(
+            targetX - bus.position.x,
+            0,
+            targetZ - bus.position.z
+          );
+          const desiredAngle = Math.atan2(toTarget.x, -toTarget.z); // -Z is forward
+
+          // Smoothly steer towards the desired angle
+          let angleDiff = desiredAngle - busRotation;
+          // Normalize angle to [-PI, PI]
+          angleDiff = Math.atan2(Math.sin(angleDiff), Math.cos(angleDiff));
+
+          // Set steering angle based on angleDiff
+          steeringAngle = Math.max(
+            -maxSteeringAngle,
+            Math.min(maxSteeringAngle, angleDiff * 2)
+          );
+
+          // Accelerate if not at max speed
+          pedalSystem.acceleratorPressTime = pedalSystem.maxPressTime * 0.7;
+          pedalSystem.brakePressTime = 0;
+
+          // Optional: slow down for sharp turns
+          if (Math.abs(angleDiff) > 0.4) {
+            pedalSystem.acceleratorPressTime = pedalSystem.maxPressTime * 0.3;
+            pedalSystem.brakePressTime = pedalSystem.maxPressTime * 0.2;
+          }
+
+          // Handbrake off
+          controls.handbrake = false;
+        }
+        // --- END AUTOPILOT LOGIC ---
+
         // Skip physics update if deltaTime is too small (optimization)
         if (deltaTime < 0.001) return;
 
@@ -1130,27 +1190,20 @@
         const nextPosition = bus.position.clone().add(moveDirection);
         const busSize = bus.userData.size || new THREE.Vector3(3, 2, 8);
 
-        // Check for collision at next position
         let collisionDetected = false;
         for (let obj of physicsObjects) {
           if (checkCollision(nextPosition, busSize, obj.position, obj.size)) {
             collisionDetected = true;
             if (obj.type === "building" || obj.type === "car") {
-              // Stop the bus and prevent movement
               busSpeed = 0;
               busPhysics.velocity.set(0, 0, 0);
-
-              // Move bus back to previous position (no nudge)
-              // Optionally, you can interpolate between current and previous to avoid overlap
-              // bus.position.copy(bus.position); // Do nothing, just don't move forward
-              // Always reset bus height to ground level
+              // Do not move bus forward
               bus.position.y = 1;
             }
             break;
           }
         }
 
-        // Only move bus if no collision
         if (!collisionDetected) {
           bus.position.add(moveDirection);
         }
@@ -1275,6 +1328,21 @@
       let steeringAngle = 0; // Current steering wheel angle in radians
       const maxSteeringAngle = Math.PI / 5; // Maximum steering angle (~36 degrees)
       const steeringSpeed = Math.PI; // How fast the wheel turns (radians/sec)
+
+      let autopilotEnabled = false;
+
+      // Sync autopilot checkbox with logic
+      window.addEventListener("DOMContentLoaded", () => {
+        const autopilotToggle = document.getElementById("autopilotToggle");
+        autopilotToggle.checked = autopilotEnabled;
+
+        autopilotToggle.addEventListener("change", (e) => {
+          autopilotEnabled = autopilotToggle.checked;
+          document.getElementById("autopilotStatus").textContent =
+            autopilotEnabled ? "ON" : "OFF";
+          console.log("Autopilot:", autopilotEnabled ? "ON" : "OFF");
+        });
+      });
     </script>
   </body>
 </html>
