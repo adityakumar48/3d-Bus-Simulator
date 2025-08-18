@@ -110,6 +110,7 @@
     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
     <script>
         // Core Three.js setup
         let scene, camera, renderer, clock;
@@ -762,57 +763,54 @@
         
         // Create a simple bus placeholder
         function createSimpleBus() {
-            // Create bus group to hold all bus parts
-            bus = new THREE.Group();
-            
-            // Bus body
-            const busGeometry = new THREE.BoxGeometry(3, 2, 8);
-            const busMaterial = new THREE.MeshLambertMaterial({ 
-                color: 0xff6b35 // Orange bus color
+            const loader = new THREE.GLTFLoader();
+            loader.load('scene.gltf', function(gltf) {
+                // Remove old bus if exists
+                if (bus) scene.remove(bus);
+
+                // Create a parent group for the bus
+                bus = new THREE.Group();
+
+                // The actual GLTF model
+                const busModel = gltf.scene;
+
+                // Fix the model's orientation ONCE here (try different values if needed)
+                busModel.rotation.y = Math.PI / 2; // 90 degrees in radians
+
+                // Scale the model if needed
+                busModel.scale.set(0.1, 0.1, 0.1);
+
+                // Add the model to the group
+                bus.add(busModel);
+
+                // Set the group position (game logic will update this)
+                bus.position.set(0, 1, 0);
+
+                // Add the group to the scene
+                scene.add(bus);
+
+                // Traverse for shadows
+                bus.traverse(function(child) {
+                    if (child.isMesh) {
+                        child.castShadow = true;
+                        child.receiveShadow = true;
+                    }
+                });
+
+                // Set initial busRotation for game logic
+                busRotation = 0; // or Math.PI/2, -Math.PI/2, etc. as needed
+
+                // ...new code here
+                const box = new THREE.Box3().setFromObject(busModel);
+                const size = new THREE.Vector3();
+                box.getSize(size);
+                bus.userData.size = size; // Save for collision use
+                // end of new code
+
+                console.log('🚌 GLTF bus loaded and wrapped in group!');
+            }, undefined, function(error) {
+                console.error('Error loading bus model:', error);
             });
-            
-            const busBody = new THREE.Mesh(busGeometry, busMaterial);
-            busBody.position.set(0, 0, 0);
-            busBody.castShadow = true;
-            bus.add(busBody);
-            
-            // Bus windows
-            const windowGeometry = new THREE.BoxGeometry(2.8, 0.8, 7.8);
-            const windowMaterial = new THREE.MeshLambertMaterial({ 
-                color: 0x87CEEB, 
-                transparent: true, 
-                opacity: 0.3 
-            });
-            
-            const windows = new THREE.Mesh(windowGeometry, windowMaterial);
-            windows.position.set(0, 0.4, 0);
-            bus.add(windows);
-            
-            // Wheels
-            const wheelGeometry = new THREE.CylinderGeometry(0.8, 0.8, 0.3, 8);
-            const wheelMaterial = new THREE.MeshLambertMaterial({ color: 0x222222 });
-            
-            const wheelPositions = [
-                { x: -1.2, y: -0.2, z: 2.5 },   // Front left
-                { x: 1.2, y: -0.2, z: 2.5 },    // Front right
-                { x: -1.2, y: -0.2, z: -2.5 },  // Rear left
-                { x: 1.2, y: -0.2, z: -2.5 }    // Rear right
-            ];
-            
-            wheelPositions.forEach(pos => {
-                const wheel = new THREE.Mesh(wheelGeometry, wheelMaterial);
-                wheel.position.set(pos.x, pos.y, pos.z);
-                wheel.rotation.z = Math.PI / 2; // Rotate to be vertical
-                wheel.castShadow = true;
-                bus.add(wheel);
-            });
-            
-            // Position bus above ground and align with road (facing forward along negative Z)
-            bus.position.set(0, 1, 0);
-            bus.rotation.y = Math.PI; // Rotate 180 degrees to face forward properly
-            scene.add(bus);
-            
-            console.log('🚌 Bus created and ready to drive!');
         }
         
         // Input handling
@@ -1000,25 +998,21 @@
 
     // Predict next position
     const nextPosition = bus.position.clone().add(moveDirection);
-    const busSize = new THREE.Vector3(3, 2, 8);
+    const busSize = bus.userData.size || new THREE.Vector3(3, 2, 8);
 
     // Check for collision at next position
     let collisionDetected = false;
     for (let obj of physicsObjects) {
        if (checkCollision(nextPosition, busSize, obj.position, obj.size)) {
     collisionDetected = true;
-    // Only stop if it's a solid object (building, car, etc.)
     if (obj.type === 'building' || obj.type === 'car') {
         // Stop the bus and prevent movement
         busSpeed = 0;
         busPhysics.velocity.set(0, 0, 0);
-        // Nudge bus slightly away from object (X/Z only)
-        const away = nextPosition.clone().sub(obj.position);
-        away.y = 0; // Ignore Y axis
-        if (away.length() > 0) {
-            away.normalize().multiplyScalar(0.1);
-            bus.position.add(away);
-        }
+
+        // Move bus back to previous position (no nudge)
+        // Optionally, you can interpolate between current and previous to avoid overlap
+        // bus.position.copy(bus.position); // Do nothing, just don't move forward
         // Always reset bus height to ground level
         bus.position.y = 1;
     }
