@@ -178,7 +178,8 @@
             // Create scene
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0x87CEEB); // Sky blue
-            
+            scene.fog = new THREE.Fog(0x87CEEB, 80, 300);
+
             // Create camera
             camera = new THREE.PerspectiveCamera(
                 75, // Field of view
@@ -200,6 +201,8 @@
             renderer.shadowMap.type = THREE.PCFSoftShadowMap;
             renderer.physicallyCorrectLights = false; // Disable for better performance
             renderer.outputEncoding = THREE.LinearEncoding; // Faster than sRGB encoding
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.toneMappingExposure = 1.1;
             document.body.appendChild(renderer.domElement);
             
             // Create clock for timing
@@ -218,24 +221,29 @@
             // Ambient light for overall illumination
             const ambientLight = new THREE.AmbientLight(0x404040, 0.4);
             scene.add(ambientLight);
-            
+
+            // Hemisphere light for sky and ground color
+            const hemiLight = new THREE.HemisphereLight(0xB1E1FF, 0x4CAF50, 0.5); // sky, ground, intensity
+            hemiLight.position.set(0, 50, 0);
+            scene.add(hemiLight);
+
             // Directional light (sun)
-            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-            directionalLight.position.set(50, 50, 25);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
+            directionalLight.position.set(50, 80, 25);
             directionalLight.castShadow = true;
-            
-            // Configure shadow settings with optimized values
-            directionalLight.shadow.mapSize.width = 1024; // Reduced for better performance
-            directionalLight.shadow.mapSize.height = 1024; // Reduced for better performance
+
+            // Configure shadow settings
+            directionalLight.shadow.mapSize.width = 2048;
+            directionalLight.shadow.mapSize.height = 2048;
             directionalLight.shadow.camera.near = 0.5;
-            directionalLight.shadow.camera.far = 200;
-            directionalLight.shadow.camera.left = -50;
-            directionalLight.shadow.camera.right = 50;
-            directionalLight.shadow.camera.top = 50;
-            directionalLight.shadow.camera.bottom = -50;
-            directionalLight.shadow.bias = -0.001; // Reduce shadow acne
-            directionalLight.shadow.normalBias = 0.05; // Improve shadow quality
-            
+            directionalLight.shadow.camera.far = 300;
+            directionalLight.shadow.camera.left = -80;
+            directionalLight.shadow.camera.right = 80;
+            directionalLight.shadow.camera.top = 80;
+            directionalLight.shadow.camera.bottom = -80;
+            directionalLight.shadow.bias = -0.001;
+            directionalLight.shadow.normalBias = 0.05;
+
             scene.add(directionalLight);
         }
         
@@ -317,8 +325,10 @@
             
             // Create road segment for this chunk (running along Z-axis)
             const roadGeometry = new THREE.PlaneGeometry(8, chunkSize); // Width=8, Length=chunkSize
-            const roadMaterial = new THREE.MeshLambertMaterial({ 
-                color: 0x333333 // Dark gray
+            const roadMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0x333333,
+                metalness: 0.2,
+                roughness: 0.7
             });
             
             const road = new THREE.Mesh(roadGeometry, roadMaterial);
@@ -790,8 +800,14 @@
                 scene.add(bus);
 
                 // Traverse for shadows
-                bus.traverse(function(child) {
+                busModel.traverse(function(child) {
                     if (child.isMesh) {
+                        // Convert to MeshStandardMaterial for realistic lighting
+                        child.material = new THREE.MeshStandardMaterial({
+                            color: child.material.color,
+                            metalness: 0.3,
+                            roughness: 0.5
+                        });
                         child.castShadow = true;
                         child.receiveShadow = true;
                     }
@@ -979,18 +995,29 @@
         }
     }
 
-    // Handle steering (reduced effectiveness with handbrake)
-    if (Math.abs(busSpeed) > 0.1) {
-    const steeringMultiplier = Math.min(1, Math.abs(busSpeed) / maxSpeed);
-    const handbrakeReduction = controls.handbrake ? 0.3 : 1.0; // Harder to steer with handbrake
-    const steeringDirection = busSpeed >= 0 ? 1 : -1; // Invert steering when reversing
+    // Smooth steering wheel logic
     if (controls.left) {
-        busRotation += turnSpeed * deltaTime * steeringMultiplier * handbrakeReduction * steeringDirection;
+        steeringAngle += steeringSpeed * deltaTime;
+    } else if (controls.right) {
+        steeringAngle -= steeringSpeed * deltaTime;
+    } else {
+        // Return steering wheel to center when not turning
+        if (steeringAngle > 0) {
+            steeringAngle = Math.max(0, steeringAngle - steeringSpeed * deltaTime * 1.5);
+        } else if (steeringAngle < 0) {
+            steeringAngle = Math.min(0, steeringAngle + steeringSpeed * deltaTime * 1.5);
+        }
     }
-    if (controls.right) {
-        busRotation -= turnSpeed * deltaTime * steeringMultiplier * handbrakeReduction * steeringDirection;
+    // Clamp to max steering angle
+    steeringAngle = Math.max(-maxSteeringAngle, Math.min(maxSteeringAngle, steeringAngle));
+
+    // Apply steering to bus rotation (invert when reversing)
+    if (Math.abs(busSpeed) > 0.1) {
+        const steeringMultiplier = Math.min(1, Math.abs(busSpeed) / maxSpeed);
+        const handbrakeReduction = controls.handbrake ? 0.3 : 1.0;
+        const steeringDirection = busSpeed >= 0 ? 1 : -1;
+        busRotation += steeringAngle * deltaTime * steeringMultiplier * handbrakeReduction * steeringDirection * 2.0;
     }
-}
 
     // Calculate intended movement (negative Z = forward direction for the bus)
     const moveDirection = new THREE.Vector3(0, 0, -busSpeed * deltaTime);
@@ -1134,6 +1161,11 @@
             animate();
             console.log('🎮 Bus Simulator with realistic pedal system is running!');
         });
+
+
+let steeringAngle = 0; // Current steering wheel angle in radians
+const maxSteeringAngle = Math.PI / 5; // Maximum steering angle (~36 degrees)
+const steeringSpeed = Math.PI; // How fast the wheel turns (radians/sec)
     </script>
 </body>
 </html>
